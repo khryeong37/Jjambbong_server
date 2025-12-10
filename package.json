@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "node src/index.js",
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "build": "echo \"Server build step not required\""
   },
   "dependencies": {
     "cors": "^2.8.5",
