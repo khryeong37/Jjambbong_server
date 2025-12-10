@@ -1,9 +1,35 @@
 const fs = require('fs/promises');
 const path = require('path');
 
-const DATA_PATH =
-  process.env.SWAP_CSV_PATH ||
-  path.resolve(__dirname, '../../client/public/data/swap.csv');
+const CANDIDATE_PATHS = [
+  process.env.SWAP_CSV_PATH,
+  path.resolve(__dirname, '../../client/public/data/swap.csv'),
+  path.resolve(process.cwd(), 'client/public/data/swap.csv'),
+  path.resolve(process.cwd(), 'public/data/swap.csv'),
+];
+
+let resolvedDataPathPromise = null;
+
+const resolveDataPath = async () => {
+  if (resolvedDataPathPromise) return resolvedDataPathPromise;
+
+  resolvedDataPathPromise = (async () => {
+    for (const candidate of CANDIDATE_PATHS) {
+      if (!candidate) continue;
+      try {
+        await fs.access(candidate);
+        return candidate;
+      } catch {
+        continue;
+      }
+    }
+    throw new Error(
+      'SWAP CSV path not found. Set SWAP_CSV_PATH to the CSV location on the server.'
+    );
+  })();
+
+  return resolvedDataPathPromise;
+};
 
 const parseNumber = (val = '') => {
   const n = Number(val);
@@ -50,7 +76,8 @@ const isAtomOneDenom = (denom = '') => {
 
 async function loadSwapNodes(dateRange, options = {}) {
   const includeHistory = options.includeHistory !== false;
-  const csv = await fs.readFile(DATA_PATH, 'utf-8');
+  const dataPath = await resolveDataPath();
+  const csv = await fs.readFile(dataPath, 'utf-8');
   const lines = csv.trim().split(/\r?\n/);
   if (lines.length <= 1) return [];
 
