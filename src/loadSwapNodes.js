@@ -23,7 +23,7 @@ const isAtomOneDenom = (denom = '') => {
 
 let clientPromise = null;
 
-async function getDb() {
+async function getDbCollection() {
   const uri = process.env.MONGODB_URI;
   if (!uri) {
     throw new Error(
@@ -49,7 +49,7 @@ async function getDb() {
 async function loadSwapNodes(dateRange, options = {}) {
   const includeHistory = options.includeHistory !== false;
 
-  const collection = await getDb();
+  const collection = await getDbCollection();
 
   // timestamp 필드 기준으로 기간 필터 구성
   const query = {};
@@ -59,13 +59,28 @@ async function loadSwapNodes(dateRange, options = {}) {
     : null;
 
   if (startMs || endMs) {
-    query.timestamp = {};
-    if (startMs) query.timestamp.$gte = startMs;
-    if (endMs) query.timestamp.$lt = endMs;
+    const exprConditions = [];
+    if (startMs) {
+      exprConditions.push({
+        $gte: [{ $toDouble: '$timestamp' }, startMs],
+      });
+    }
+    if (endMs) {
+      exprConditions.push({
+        $lt: [{ $toDouble: '$timestamp' }, endMs],
+      });
+    }
+
+    if (exprConditions.length === 1) {
+      query.$expr = exprConditions[0];
+    } else if (exprConditions.length > 1) {
+      query.$expr = { $and: exprConditions };
+    }
   }
 
   // MongoDB에서 해당 기간의 모든 스왑 로우 가져오기
   const docs = await collection.find(query).toArray();
+  console.log('[DB] Query:', JSON.stringify(query));
   if (!docs.length) return [];
 
   const aggMap = new Map();
