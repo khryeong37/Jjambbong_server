@@ -4,9 +4,14 @@ const dotenv = require('dotenv');
 const { connectDB, isDBConnected } = require('./db');
 const NodeModel = require('./models/Node');
 const { loadSwapNodes } = require('./loadSwapNodes');
+const { ensureViews } = require('./duckdbClient');
+const { fetchMarketSnapshot } = require('./marketService');
 
 dotenv.config();
 connectDB();
+ensureViews()
+  .then(() => console.log('[DuckDB] Views ready'))
+  .catch((error) => console.warn('[DuckDB] View initialization failed:', error.message));
 
 const app = express();
 const port = process.env.PORT || 4000;
@@ -52,6 +57,19 @@ app.get('/api/nodes/:id', async (req, res) => {
   } catch (error) {
     console.error('Failed to load node detail', error);
     res.status(500).json({ error: 'Failed to load node detail' });
+  }
+});
+
+app.get('/api/market', async (_req, res) => {
+  try {
+    const snapshot = await fetchMarketSnapshot();
+    if (!snapshot.atom && !snapshot.atone) {
+      return res.status(503).json({ error: 'Market data unavailable' });
+    }
+    res.json(snapshot);
+  } catch (error) {
+    console.error('Failed to load market data', error);
+    res.status(500).json({ error: 'Failed to load market data' });
   }
 });
 
@@ -163,6 +181,10 @@ async function fetchNodesFromDB(options) {
         'address name size bias totalVolume avgTradeSize netBuyRatio txCount atomVolumeShare oneVolumeShare ibcVolumeShare activeDays lastActiveDate timing correlationScore scaleScore roi description composition'
       )
       .lean();
+
+    if (!docs || docs.length === 0) {
+      return null;
+    }
 
     return docs.map(normalizeNodeDoc);
   } catch (error) {

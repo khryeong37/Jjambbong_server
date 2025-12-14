@@ -1,6 +1,7 @@
 // server/src/loadSwapNodes.js
 
 const { MongoClient } = require('mongodb');
+const { run: runDuckdbQuery } = require('./duckdbClient');
 
 // ---------- 공통 유틸 ----------
 
@@ -25,11 +26,7 @@ let clientPromise = null;
 
 async function getDbCollection() {
   const uri = process.env.MONGODB_URI;
-  if (!uri) {
-    throw new Error(
-      'MONGODB_URI 환경변수가 설정되어 있지 않습니다. Render Environment에 Atlas 연결 문자열을 추가하세요.'
-    );
-  }
+  if (!uri) return null;
 
   if (!clientPromise) {
     const client = new MongoClient(uri);
@@ -44,51 +41,97 @@ async function getDbCollection() {
   return client.db(dbName).collection(collName);
 }
 
+async function fetchDocsFromMongo() {
+  const collection = await getDbCollection();
+  if (!collection) return [];
+
+  const docs = await collection.find({}).toArray();
+  return docs;
+}
+
+async function fetchDocsFromDuckdb() {
+  const sql = `
+    SELECT
+      type,
+      timestamp,
+      timestamp_converted,
+      date,
+      sender,
+      txHash,
+      tokenInAmount1,
+      tokenInDenom1,
+      tokenOutAmount1,
+      tokenOutDenom1,
+      tokenOutAmount2,
+      tokenOutDenom2,
+      tokenOutAmount3,
+      tokenOutDenom3,
+      price_atom,
+      price_atone,
+      tx_volume
+    FROM swap_data
+  `;
+
+  const rows = await runDuckdbQuery(sql);
+  return rows;
+}
+
+function parseTimestamp(value) {
+  if (!value || typeof value !== 'string') return null;
+  const [datePart, timePart = '00:00'] = value.trim().split(' ');
+  const [year, month, day] = (datePart || '').split('.').map((v) => Number(v));
+  const [hour, minute] = timePart.split(':').map((v) => Number(v));
+  if (!year || !month || !day) return null;
+
+  const pad = (n) => String(n).padStart(2, '0');
+  const iso = `${pad(year)}-${pad(month)}-${pad(day)}T${pad(hour || 0)}:${pad(minute || 0)}:00+09:00`;
+  const parsed = Date.parse(iso);
+  if (Number.isNaN(parsed)) return null;
+  return new Date(parsed);
+}
+
+function filterDocsByDateRange(docs, dateRange) {
+  if (!dateRange?.start && !dateRange?.end) return docs;
+  const startMs = dateRange?.start ? new Date(dateRange.start).getTime() : null;
+  const endMs = dateRange?.end ? new Date(dateRange.end).getTime() + 86400000 : null;
+    return docs.filter((doc) => {
+      const ts = parseTimestamp(doc.timestamp_converted || doc.date);
+      if (!ts) return false;
+      const ms = ts.getTime();
+      if (startMs && ms < startMs) return false;
+      if (endMs && ms >= endMs) return false;
+      return true;
+    });
+}
+
 // ---------- 메인 함수: CSV 대신 MongoDB에서 읽기 ----------
 
 async function loadSwapNodes(dateRange, options = {}) {
   const includeHistory = options.includeHistory !== false;
 
-  const collection = await getDbCollection();
-
-  // timestamp 필드 기준으로 기간 필터 구성
-  const query = {};
-  const startMs = dateRange?.start ? new Date(dateRange.start).getTime() : null;
-  const endMs = dateRange?.end
-    ? new Date(dateRange.end).getTime() + 86400000
-    : null;
-
-  if (startMs || endMs) {
-    const exprConditions = [];
-    if (startMs) {
-      exprConditions.push({
-        $gte: [{ $toDouble: '$timestamp' }, startMs],
-      });
-    }
-    if (endMs) {
-      exprConditions.push({
-        $lt: [{ $toDouble: '$timestamp' }, endMs],
-      });
-    }
-
-    if (exprConditions.length === 1) {
-      query.$expr = exprConditions[0];
-    } else if (exprConditions.length > 1) {
-      query.$expr = { $and: exprConditions };
-    }
+  let docs = [];
+  try {
+    docs = await fetchDocsFromMongo();
+  } catch (error) {
+    console.warn('[DB] Mongo fetch failed, falling back to DuckDB:', error.message);
+    docs = [];
   }
 
-  // MongoDB에서 해당 기간의 모든 스왑 로우 가져오기
-  const docs = await collection.find(query).toArray();
-  console.log('[DB] Query:', JSON.stringify(query));
-  if (!docs.length) return [];
+  if (!docs.length) {
+    docs = await fetchDocsFromDuckdb();
+  }
+
+  const filteredDocs = filterDocsByDateRange(docs, dateRange);
+  if (!filteredDocs.length) return [];
 
   const aggMap = new Map();
 
-  for (const doc of docs) {
-    const timestamp = parseNumber(doc.timestamp);
+  for (const doc of filteredDocs) {
+    const parsedTs = parseTimestamp(doc.timestamp_converted || doc.date);
     const sender = doc.sender;
-    if (!sender || !Number.isFinite(timestamp)) continue;
+    if (!sender || !parsedTs) continue;
+    const timestamp = parsedTs.getTime();
+    const date = parsedTs.toISOString().split('T')[0];
 
     const tokenInAmounts = [
       parseNumber(doc.tokenInAmount1),
@@ -129,8 +172,6 @@ async function loadSwapNodes(dateRange, options = {}) {
     });
 
     const netFlow = outSum - inSum;
-    const date = new Date(timestamp).toISOString().split('T')[0];
-
     const allDenoms = [...tokenInDenoms, ...tokenOutDenoms].filter(Boolean);
     const hasAtom = allDenoms.some(isAtomDenom);
     const hasAtomOne = allDenoms.some(isAtomOneDenom);
