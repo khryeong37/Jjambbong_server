@@ -41,22 +41,29 @@ app.get('/api/nodes', async (req, res) => {
     const fallback = await loadSwapNodes(options.dateRange, { includeHistory: false });
     res.json(limitCollection(fallback, options.limit));
   } catch (error) {
-    console.error('Failed to load nodes', error);
-    res.status(500).json({ error: 'Failed to load nodes' });
+    console.error('Failed to load nodes', error?.stack || error);
+    res.status(500).json({
+      error: 'Failed to load nodes',
+      message: error?.message || 'Unknown error',
+    });
   }
 });
 
 app.get('/api/nodes/:id', async (req, res) => {
   const { id } = req.params;
   try {
-    const node = await fetchNodeDetail(id);
+    const options = buildFilterOptions(req.query);
+    const node = await fetchNodeDetail(id, { dateRange: options.dateRange });
     if (!node) {
       return res.status(404).json({ error: 'Node not found' });
     }
     res.json(node);
   } catch (error) {
-    console.error('Failed to load node detail', error);
-    res.status(500).json({ error: 'Failed to load node detail' });
+    console.error('Failed to load node detail', error?.stack || error);
+    res.status(500).json({
+      error: 'Failed to load node detail',
+      message: error?.message || 'Unknown error',
+    });
   }
 });
 
@@ -68,8 +75,11 @@ app.get('/api/market', async (_req, res) => {
     }
     res.json(snapshot);
   } catch (error) {
-    console.error('Failed to load market data', error);
-    res.status(500).json({ error: 'Failed to load market data' });
+    console.error('Failed to load market data', error?.stack || error);
+    res.status(500).json({
+      error: 'Failed to load market data',
+      message: error?.message || 'Unknown error',
+    });
   }
 });
 
@@ -178,7 +188,7 @@ async function fetchNodesFromDB(options) {
       .sort({ size: -1 })
       .limit(options.limit)
       .select(
-        'address name size bias totalVolume avgTradeSize netBuyRatio txCount atomVolumeShare oneVolumeShare ibcVolumeShare activeDays lastActiveDate timing correlationScore scaleScore roi description composition'
+        'address name size bias totalVolume avgTradeSize netBuyRatio txCount atomVolumeShare oneVolumeShare ibcVolumeShare activeDays lastActiveDate timing correlationScore scaleScore roi description composition shareScore flowCorrelationScore crossVolume marketSharePct swapProfile timingDetail'
       )
       .lean();
 
@@ -193,16 +203,36 @@ async function fetchNodesFromDB(options) {
   }
 }
 
-async function fetchNodeDetail(id) {
+async function fetchNodeDetail(id, options = {}) {
+  const dateRange = options.dateRange;
+
+  const fromAggregates = await loadNodeFromAggregates(id, dateRange);
+  if (fromAggregates) {
+    return fromAggregates;
+  }
+
   if (isDBConnected()) {
     const node = await NodeModel.findOne({
       $or: [{ _id: id }, { address: id }],
     }).lean();
-    if (node) return normalizeNodeDoc(node, true);
+    if (node) {
+      const normalized = normalizeNodeDoc(node, true);
+      const needsRefresh =
+        !normalized.history?.length ||
+        !normalized.swapProfile ||
+        normalized.swapProfile.cross?.count === undefined;
+      if (!needsRefresh) {
+        return normalized;
+      }
+      const recomputed = await loadNodeFromAggregates(id, dateRange);
+      if (recomputed) return recomputed;
+      return normalized;
+    }
   }
 
-  const nodes = await loadSwapNodes(undefined, { includeHistory: true });
-  return nodes.find((n) => n.id === id || n.address === id) || null;
+  const fallback = await loadNodeFromAggregates(id, undefined);
+  if (fallback) return fallback;
+  return null;
 }
 
 function normalizeNodeDoc(doc, includeHistory = false) {
@@ -216,4 +246,14 @@ function normalizeNodeDoc(doc, includeHistory = false) {
     delete base.history;
   }
   return base;
+}
+
+async function loadNodeFromAggregates(id, dateRange) {
+  try {
+    const nodes = await loadSwapNodes(dateRange, { includeHistory: true });
+    return nodes.find((n) => n.id === id || n.address === id) || null;
+  } catch (error) {
+    console.error('[AGG] Failed to load node from aggregates:', error.message);
+    return null;
+  }
 }
