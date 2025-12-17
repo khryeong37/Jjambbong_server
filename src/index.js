@@ -59,10 +59,11 @@ app.get('/api/nodes/:id', async (req, res) => {
     }
     res.json(node);
   } catch (error) {
-    console.error('Failed to load node detail', error?.stack || error);
+    console.error('❌ /api/nodes/:id failed', error);
     res.status(500).json({
       error: 'Failed to load node detail',
       message: error?.message || 'Unknown error',
+      stack: error?.stack,
     });
   }
 });
